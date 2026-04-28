@@ -22,6 +22,7 @@ import {
   Checkbox,
   ConfigProvider,
   Divider,
+  Dropdown,
   Empty,
   Input,
   InputNumber,
@@ -36,7 +37,7 @@ import {
   theme,
 } from "antd";
 import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import styles from "./page.module.css";
 
 type Locale = "ko" | "en" | "ja";
@@ -57,6 +58,26 @@ type NamespacePolicy = {
   user: boolean;
   talk: boolean;
   special: boolean;
+};
+
+type LocalSettings = {
+  locale: Locale;
+  mode: ColorMode;
+  siteKey: string;
+  customBaseUrl: string;
+  customApiEndpoint: string;
+  customEngine: WikiEngine;
+  startTitle: string;
+  targetTitle: string;
+  includeFootnotes: boolean;
+  redirectMode: RedirectMode;
+  namespacePolicy: NamespacePolicy;
+  requiredEnabled: boolean;
+  requiredPosition: number;
+  requiredTitle: string;
+  maxDepth: number;
+  maxNodes: number;
+  viewMode: ViewMode;
 };
 
 type PresetSite = {
@@ -311,6 +332,42 @@ const namespaceLabels: Array<{ key: keyof NamespacePolicy; label: string }> = [
   { key: "special", label: "Special" },
 ];
 
+const localSettingsKey = "LocalSettings";
+const defaultNamespacePolicy: NamespacePolicy = {
+  file: false,
+  category: false,
+  template: false,
+  user: false,
+  talk: false,
+  special: false,
+};
+
+const defaultLocalSettings: LocalSettings = {
+  locale: "ko",
+  mode: "light",
+  siteKey: "ko-wikipedia",
+  customBaseUrl: "",
+  customApiEndpoint: "",
+  customEngine: "mediawiki",
+  startTitle: "대한민국",
+  targetTitle: "철학",
+  includeFootnotes: false,
+  redirectMode: "auto",
+  namespacePolicy: defaultNamespacePolicy,
+  requiredEnabled: false,
+  requiredPosition: 2,
+  requiredTitle: "",
+  maxDepth: 4,
+  maxNodes: 140,
+  viewMode: "iframe",
+};
+
+const localeLabels: Record<Locale, string> = {
+  ko: "한국어",
+  en: "English",
+  ja: "日本語",
+};
+
 export default function WikiSpeedrunClient() {
   const [mode, setMode] = useState<ColorMode>("light");
 
@@ -340,31 +397,47 @@ function WikiSpeedrunSurface({
   mode: ColorMode;
   setMode: (mode: ColorMode | ((mode: ColorMode) => ColorMode)) => void;
 }) {
-  const [locale, setLocale] = useState<Locale>("ko");
-  const [siteKey, setSiteKey] = useState("ko-wikipedia");
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [locale, setLocale] = useState<Locale>(defaultLocalSettings.locale);
+  const [siteKey, setSiteKey] = useState(defaultLocalSettings.siteKey);
   const selectedPreset =
     presets.find((site) => site.key === siteKey) ?? presets[0];
-  const [customBaseUrl, setCustomBaseUrl] = useState("");
-  const [customApiEndpoint, setCustomApiEndpoint] = useState("");
-  const [customEngine, setCustomEngine] = useState<WikiEngine>("mediawiki");
-  const [startTitle, setStartTitle] = useState("대한민국");
-  const [targetTitle, setTargetTitle] = useState("철학");
-  const [includeFootnotes, setIncludeFootnotes] = useState(false);
-  const [redirectMode, setRedirectMode] = useState<RedirectMode>("auto");
+  const [customBaseUrl, setCustomBaseUrl] = useState(
+    defaultLocalSettings.customBaseUrl,
+  );
+  const [customApiEndpoint, setCustomApiEndpoint] = useState(
+    defaultLocalSettings.customApiEndpoint,
+  );
+  const [customEngine, setCustomEngine] = useState<WikiEngine>(
+    defaultLocalSettings.customEngine,
+  );
+  const [startTitle, setStartTitle] = useState(defaultLocalSettings.startTitle);
+  const [targetTitle, setTargetTitle] = useState(
+    defaultLocalSettings.targetTitle,
+  );
+  const [includeFootnotes, setIncludeFootnotes] = useState(
+    defaultLocalSettings.includeFootnotes,
+  );
+  const [redirectMode, setRedirectMode] = useState<RedirectMode>(
+    defaultLocalSettings.redirectMode,
+  );
   const [namespacePolicy, setNamespacePolicy] = useState<NamespacePolicy>({
-    file: false,
-    category: false,
-    template: false,
-    user: false,
-    talk: false,
-    special: false,
+    ...defaultLocalSettings.namespacePolicy,
   });
-  const [requiredEnabled, setRequiredEnabled] = useState(false);
-  const [requiredPosition, setRequiredPosition] = useState(2);
-  const [requiredTitle, setRequiredTitle] = useState("");
-  const [maxDepth, setMaxDepth] = useState(4);
-  const [maxNodes, setMaxNodes] = useState(140);
-  const [viewMode, setViewMode] = useState<ViewMode>("iframe");
+  const [requiredEnabled, setRequiredEnabled] = useState(
+    defaultLocalSettings.requiredEnabled,
+  );
+  const [requiredPosition, setRequiredPosition] = useState(
+    defaultLocalSettings.requiredPosition,
+  );
+  const [requiredTitle, setRequiredTitle] = useState(
+    defaultLocalSettings.requiredTitle,
+  );
+  const [maxDepth, setMaxDepth] = useState(defaultLocalSettings.maxDepth);
+  const [maxNodes, setMaxNodes] = useState(defaultLocalSettings.maxNodes);
+  const [viewMode, setViewMode] = useState<ViewMode>(
+    defaultLocalSettings.viewMode,
+  );
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<SpeedrunResponse | null>(null);
@@ -387,6 +460,73 @@ function WikiSpeedrunSurface({
   const success = result?.ok ? result : null;
   const failure = result && !result.ok ? result : null;
   const activeNode = success?.path[activeIndex] ?? success?.path[0];
+
+  useEffect(() => {
+    const saved = readLocalSettings();
+    setLocale(saved.locale);
+    setMode(saved.mode);
+    setSiteKey(saved.siteKey);
+    setCustomBaseUrl(saved.customBaseUrl);
+    setCustomApiEndpoint(saved.customApiEndpoint);
+    setCustomEngine(saved.customEngine);
+    setStartTitle(saved.startTitle);
+    setTargetTitle(saved.targetTitle);
+    setIncludeFootnotes(saved.includeFootnotes);
+    setRedirectMode(saved.redirectMode);
+    setNamespacePolicy(saved.namespacePolicy);
+    setRequiredEnabled(saved.requiredEnabled);
+    setRequiredPosition(saved.requiredPosition);
+    setRequiredTitle(saved.requiredTitle);
+    setMaxDepth(saved.maxDepth);
+    setMaxNodes(saved.maxNodes);
+    setViewMode(saved.viewMode);
+    setSettingsReady(true);
+  }, [setMode]);
+
+  useEffect(() => {
+    if (!settingsReady) {
+      return;
+    }
+
+    writeLocalSettings({
+      locale,
+      mode,
+      siteKey,
+      customBaseUrl,
+      customApiEndpoint,
+      customEngine,
+      startTitle,
+      targetTitle,
+      includeFootnotes,
+      redirectMode,
+      namespacePolicy,
+      requiredEnabled,
+      requiredPosition,
+      requiredTitle,
+      maxDepth,
+      maxNodes,
+      viewMode,
+    });
+  }, [
+    customApiEndpoint,
+    customBaseUrl,
+    customEngine,
+    includeFootnotes,
+    locale,
+    maxDepth,
+    maxNodes,
+    mode,
+    namespacePolicy,
+    redirectMode,
+    requiredEnabled,
+    requiredPosition,
+    requiredTitle,
+    settingsReady,
+    siteKey,
+    startTitle,
+    targetTitle,
+    viewMode,
+  ]);
 
   async function runSearch() {
     setLoading(true);
@@ -458,15 +598,26 @@ function WikiSpeedrunSurface({
             </div>
           </div>
           <div className={styles.headerTools}>
-            <Segmented
-              value={locale}
-              onChange={(value) => setLocale(value as Locale)}
-              options={[
-                { label: "KO", value: "ko" },
-                { label: "EN", value: "en" },
-                { label: "JA", value: "ja" },
-              ]}
-            />
+            <Dropdown
+              menu={{
+                selectable: true,
+                selectedKeys: [locale],
+                onClick: ({ key }) => setLocale(key as Locale),
+                items: [
+                  { key: "ko", label: "한국어" },
+                  { key: "en", label: "English" },
+                  { key: "ja", label: "日本語" },
+                ],
+              }}
+              placement="bottomRight"
+              trigger={["click"]}
+            >
+              <Button
+                aria-label={localeLabels[locale]}
+                icon={<GlobalOutlined />}
+                title={localeLabels[locale]}
+              />
+            </Dropdown>
             <Tooltip title={mode === "dark" ? "Light" : "Dark"}>
               <Button
                 icon={mode === "dark" ? <SunOutlined /> : <MoonOutlined />}
@@ -914,4 +1065,175 @@ function Metric({
       <div className={styles.metricValue}>{value}</div>
     </div>
   );
+}
+
+function readLocalSettings() {
+  if (typeof window === "undefined") {
+    return defaultLocalSettings;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(localSettingsKey);
+    if (!raw) {
+      return defaultLocalSettings;
+    }
+    return sanitizeLocalSettings(JSON.parse(raw));
+  } catch {
+    return defaultLocalSettings;
+  }
+}
+
+function writeLocalSettings(settings: LocalSettings) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(
+      localSettingsKey,
+      JSON.stringify(sanitizeLocalSettings(settings)),
+    );
+  } catch {
+    // Ignore private-mode or quota failures; settings persistence is optional.
+  }
+}
+
+function sanitizeLocalSettings(value: unknown): LocalSettings {
+  if (!value || typeof value !== "object") {
+    return defaultLocalSettings;
+  }
+
+  const candidate = value as Partial<LocalSettings>;
+  const locale = isLocale(candidate.locale)
+    ? candidate.locale
+    : defaultLocalSettings.locale;
+  const mode = isColorMode(candidate.mode)
+    ? candidate.mode
+    : defaultLocalSettings.mode;
+  const siteKey =
+    typeof candidate.siteKey === "string" &&
+    presets.some((site) => site.key === candidate.siteKey)
+      ? candidate.siteKey
+      : defaultLocalSettings.siteKey;
+  const customEngine = isWikiEngine(candidate.customEngine)
+    ? candidate.customEngine
+    : defaultLocalSettings.customEngine;
+  const redirectMode = isRedirectMode(candidate.redirectMode)
+    ? candidate.redirectMode
+    : defaultLocalSettings.redirectMode;
+  const viewMode = isViewMode(candidate.viewMode)
+    ? candidate.viewMode
+    : defaultLocalSettings.viewMode;
+
+  return {
+    locale,
+    mode,
+    siteKey,
+    customBaseUrl: stringOrDefault(
+      candidate.customBaseUrl,
+      defaultLocalSettings.customBaseUrl,
+    ),
+    customApiEndpoint: stringOrDefault(
+      candidate.customApiEndpoint,
+      defaultLocalSettings.customApiEndpoint,
+    ),
+    customEngine,
+    startTitle: stringOrDefault(
+      candidate.startTitle,
+      defaultLocalSettings.startTitle,
+    ),
+    targetTitle: stringOrDefault(
+      candidate.targetTitle,
+      defaultLocalSettings.targetTitle,
+    ),
+    includeFootnotes:
+      typeof candidate.includeFootnotes === "boolean"
+        ? candidate.includeFootnotes
+        : defaultLocalSettings.includeFootnotes,
+    redirectMode,
+    namespacePolicy: sanitizeNamespacePolicy(candidate.namespacePolicy),
+    requiredEnabled:
+      typeof candidate.requiredEnabled === "boolean"
+        ? candidate.requiredEnabled
+        : defaultLocalSettings.requiredEnabled,
+    requiredPosition: numberOrDefault(
+      candidate.requiredPosition,
+      defaultLocalSettings.requiredPosition,
+      2,
+      12,
+    ),
+    requiredTitle: stringOrDefault(
+      candidate.requiredTitle,
+      defaultLocalSettings.requiredTitle,
+    ),
+    maxDepth: numberOrDefault(
+      candidate.maxDepth,
+      defaultLocalSettings.maxDepth,
+      1,
+      8,
+    ),
+    maxNodes: numberOrDefault(
+      candidate.maxNodes,
+      defaultLocalSettings.maxNodes,
+      20,
+      1200,
+    ),
+    viewMode,
+  };
+}
+
+function sanitizeNamespacePolicy(value: unknown): NamespacePolicy {
+  if (!value || typeof value !== "object") {
+    return defaultNamespacePolicy;
+  }
+  const candidate = value as Partial<NamespacePolicy>;
+  return {
+    file: Boolean(candidate.file),
+    category: Boolean(candidate.category),
+    template: Boolean(candidate.template),
+    user: Boolean(candidate.user),
+    talk: Boolean(candidate.talk),
+    special: Boolean(candidate.special),
+  };
+}
+
+function isLocale(value: unknown): value is Locale {
+  return value === "ko" || value === "en" || value === "ja";
+}
+
+function isColorMode(value: unknown): value is ColorMode {
+  return value === "light" || value === "dark";
+}
+
+function isWikiEngine(value: unknown): value is WikiEngine {
+  return (
+    value === "mediawiki" ||
+    value === "the-seed" ||
+    value === "opennamu" ||
+    value === "dokuwiki" ||
+    value === "moniwiki"
+  );
+}
+
+function isRedirectMode(value: unknown): value is RedirectMode {
+  return value === "auto" || value === "count";
+}
+
+function isViewMode(value: unknown): value is ViewMode {
+  return value === "iframe" || value === "compact";
+}
+
+function stringOrDefault(value: unknown, fallback: string) {
+  return typeof value === "string" ? value : fallback;
+}
+
+function numberOrDefault(
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.min(Math.max(Math.trunc(value), min), max);
 }
