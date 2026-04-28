@@ -99,6 +99,18 @@ type HtmlFetchResult = {
   status: number;
 };
 
+type ProgressUpdate = {
+  stage: string;
+  message: string;
+  percent: number;
+  expanded?: number;
+  queued?: number;
+  depth?: number;
+  title?: string;
+};
+
+type ProgressReporter = (update: ProgressUpdate) => void;
+
 const namespaceGroups = {
   file: new Set([6, 7]),
   category: new Set([14, 15]),
@@ -141,77 +153,12 @@ const userAgent =
 export async function POST(request: Request) {
   try {
     const body = normalizeRequest((await request.json()) as SpeedrunRequest);
-    const adapter =
-      body.engine === "mediawiki"
-        ? await createMediaWikiAdapter(body)
-        : createHtmlWikiAdapter(body);
-
-    const start = await adapter.resolvePage(body.startTitle);
-    if (!start) {
-      return fail(
-        "START_NOT_FOUND",
-        "The start document could not be resolved to an existing page.",
-      );
+    if (new URL(request.url).searchParams.get("stream") === "1") {
+      return streamSpeedrun(body);
     }
 
-    const target = await adapter.resolvePage(body.targetTitle);
-    if (!target) {
-      return fail(
-        "TARGET_NOT_FOUND",
-        "The target document could not be resolved to an existing page.",
-      );
-    }
-
-    const required = body.requiredStep?.enabled
-      ? await adapter.resolvePage(body.requiredStep.title)
-      : null;
-    if (body.requiredStep?.enabled && !required) {
-      return fail(
-        "REQUIRED_STEP_NOT_FOUND",
-        "The required Nth document could not be resolved.",
-      );
-    }
-
-    if (start.pageId === target.pageId) {
-      return fail(
-        "SAME_DOCUMENT",
-        "Start and target resolve to the same canonical page.",
-      );
-    }
-
-    const startLinks = await adapter.getOutgoingLinks(start);
-    if (startLinks.length === 0) {
-      return fail(
-        "START_HAS_NO_VALID_OUT_LINKS",
-        "The start document exists, but it has no valid outgoing links under the current options.",
-      );
-    }
-
-    const targetBacklinks = await adapter.getBacklinkCount(target);
-    if (targetBacklinks === 0) {
-      return fail(
-        "TARGET_HAS_NO_VALID_IN_LINKS",
-        "The target document exists, but no valid backlinks were found under the current options.",
-      );
-    }
-
-    const result = await findPath(adapter, start, target, required, body, {
-      [start.pageId]: startLinks,
-    });
-
-    return Response.json({
-      ok: true,
-      endpoint: adapter.endpoint,
-      backlinkMode: adapter.backlinkMode,
-      start,
-      target,
-      required,
-      ...result,
-      checks: {
-        startOutLinks: startLinks.length,
-        targetBacklinks,
-      },
-    });
+    const payload = await runSpeedrun(body);
+    return Response.json(payload);
   } catch (error) {
     if (error instanceof SpeedrunError) {
       return fail(error.code, error.message);
@@ -225,6 +172,182 @@ export async function POST(request: Request) {
   }
 }
 
+function streamSpeedrun(body: SpeedrunRequest) {
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (event: unknown) => {
+        controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
+      };
+
+      try {
+        const payload = await runSpeedrun(body, (update) =>
+          send({ type: "progress", ...update }),
+        );
+        send({ type: "result", data: payload });
+      } catch (error) {
+        if (error instanceof SpeedrunError) {
+          send({
+            type: "result",
+            data: failurePayload(error.code, error.message),
+          });
+        } else {
+          send({
+            type: "result",
+            data: failurePayload(
+              "NETWORK_ERROR",
+              error instanceof Error
+                ? error.message
+                : "Unexpected network or parsing failure.",
+            ),
+          });
+        }
+      } finally {
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "application/x-ndjson; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
+async function runSpeedrun(body: SpeedrunRequest, report?: ProgressReporter) {
+  report?.({
+    stage: "prepare",
+    message: "Preparing wiki adapter.",
+    percent: 4,
+  });
+
+  const adapter =
+    body.engine === "mediawiki"
+      ? await createMediaWikiAdapter(body)
+      : createHtmlWikiAdapter(body);
+
+  report?.({
+    stage: "resolve_start",
+    message: "Resolving start document.",
+    percent: 9,
+    title: body.startTitle,
+  });
+  const start = await adapter.resolvePage(body.startTitle);
+  if (!start) {
+    return failurePayload(
+      "START_NOT_FOUND",
+      "The start document could not be resolved to an existing page.",
+    );
+  }
+
+  report?.({
+    stage: "resolve_target",
+    message: "Resolving target document.",
+    percent: 15,
+    title: body.targetTitle,
+  });
+  const target = await adapter.resolvePage(body.targetTitle);
+  if (!target) {
+    return failurePayload(
+      "TARGET_NOT_FOUND",
+      "The target document could not be resolved to an existing page.",
+    );
+  }
+
+  report?.({
+    stage: "resolve_required",
+    message: "Checking required Nth document option.",
+    percent: 20,
+  });
+  const required = body.requiredStep?.enabled
+    ? await adapter.resolvePage(body.requiredStep.title)
+    : null;
+  if (body.requiredStep?.enabled && !required) {
+    return failurePayload(
+      "REQUIRED_STEP_NOT_FOUND",
+      "The required Nth document could not be resolved.",
+    );
+  }
+
+  if (start.pageId === target.pageId) {
+    return failurePayload(
+      "SAME_DOCUMENT",
+      "Start and target resolve to the same canonical page.",
+    );
+  }
+
+  report?.({
+    stage: "start_links",
+    message: "Collecting valid outgoing links from the start document.",
+    percent: 28,
+    title: start.title,
+  });
+  const startLinks = await adapter.getOutgoingLinks(start);
+  if (startLinks.length === 0) {
+    return failurePayload(
+      "START_HAS_NO_VALID_OUT_LINKS",
+      "The start document exists, but it has no valid outgoing links under the current options.",
+    );
+  }
+
+  report?.({
+    stage: "target_backlinks",
+    message: "Checking target backlinks.",
+    percent: 36,
+    title: target.title,
+  });
+  const targetBacklinks = await adapter.getBacklinkCount(target);
+  if (targetBacklinks === 0) {
+    return failurePayload(
+      "TARGET_HAS_NO_VALID_IN_LINKS",
+      "The target document exists, but no valid backlinks were found under the current options.",
+    );
+  }
+
+  report?.({
+    stage: "search",
+    message: "Searching reachable wiki graph.",
+    percent: 42,
+    expanded: 0,
+    queued: 1,
+  });
+  const result = await findPath(
+    adapter,
+    start,
+    target,
+    required,
+    body,
+    {
+      [start.pageId]: startLinks,
+    },
+    report,
+  );
+
+  report?.({
+    stage: "complete",
+    message: "Route search completed.",
+    percent: 100,
+    expanded: result.expanded,
+  });
+
+  return {
+    ok: true,
+    endpoint: adapter.endpoint,
+    backlinkMode: adapter.backlinkMode,
+    start,
+    target,
+    required,
+    ...result,
+    checks: {
+      startOutLinks: startLinks.length,
+      targetBacklinks,
+    },
+  };
+}
+
 async function findPath(
   adapter: WikiAdapter,
   start: ResolvedPage,
@@ -232,6 +355,7 @@ async function findPath(
   required: ResolvedPage | null,
   request: SpeedrunRequest,
   seededLinks: Record<string, Candidate[]>,
+  report?: ProgressReporter,
 ) {
   type QueueEntry = {
     current: ResolvedPage;
@@ -254,6 +378,18 @@ async function findPath(
     }
 
     expanded += 1;
+    report?.({
+      stage: "search",
+      message: `Expanding "${entry.current.title}".`,
+      percent: Math.min(
+        96,
+        42 + Math.round((expanded / request.search.maxNodes) * 54),
+      ),
+      expanded,
+      queued: queue.length,
+      depth: entry.hops.length,
+      title: entry.current.title,
+    });
     if (expanded > request.search.maxNodes) {
       throw new SpeedrunError(
         "SEARCH_LIMIT_EXCEEDED",
@@ -1404,19 +1540,20 @@ function sleep(ms: number) {
 }
 
 function fail(code: ErrorCode, message: string) {
-  return Response.json(
-    {
-      ok: false,
-      error: {
-        code,
-        message,
-      },
+  return Response.json(failurePayload(code, message), {
+    status:
+      code === "NETWORK_ERROR" || code === "SITE_RATE_LIMITED" ? 502 : 200,
+  });
+}
+
+function failurePayload(code: ErrorCode, message: string) {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
     },
-    {
-      status:
-        code === "NETWORK_ERROR" || code === "SITE_RATE_LIMITED" ? 502 : 200,
-    },
-  );
+  };
 }
 
 class SpeedrunError extends Error {

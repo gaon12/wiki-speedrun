@@ -181,6 +181,63 @@
   padding: 18px;
 }
 
+.progressPanel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--app-subtle);
+}
+
+.progressHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.progressTitle {
+  color: var(--app-foreground);
+  font-size: 13px;
+  font-weight: 720;
+  line-height: 18px;
+}
+
+.progressMessage {
+  margin-top: 2px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.progressStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.progressLog {
+  display: grid;
+  max-height: 132px;
+  overflow: auto;
+  gap: 6px;
+  border-top: 1px solid var(--app-border);
+  padding-top: 10px;
+}
+
+.logLine {
+  overflow-wrap: anywhere;
+  color: var(--app-muted);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 11px;
+  line-height: 16px;
+}
+
 .fieldStack {
   display: grid;
   gap: 14px;

@@ -121,6 +121,20 @@ type SpeedrunResponse =
       };
     };
 
+type SearchProgress = {
+  stage: string;
+  message: string;
+  percent: number;
+  expanded?: number;
+  queued?: number;
+  depth?: number;
+  title?: string;
+};
+
+type StreamEvent =
+  | (SearchProgress & { type: "progress" })
+  | { type: "result"; data: SpeedrunResponse };
+
 const presets: PresetSite[] = [
   {
     key: "ko-wikipedia",
@@ -228,6 +242,9 @@ const text = {
     noResult: "실패",
     success: "성공",
     errorCode: "오류 코드",
+    progress: "진행 상황",
+    queue: "대기",
+    depth: "깊이",
   },
   en: {
     subtitle:
@@ -275,6 +292,9 @@ const text = {
     noResult: "Failed",
     success: "Success",
     errorCode: "Error code",
+    progress: "Progress",
+    queue: "Queued",
+    depth: "Depth",
   },
   ja: {
     subtitle: "正規化、リダイレクト、有効リンク判定を含むWiki経路探索",
@@ -320,6 +340,9 @@ const text = {
     noResult: "失敗",
     success: "成功",
     errorCode: "エラーコード",
+    progress: "進行状況",
+    queue: "待機",
+    depth: "深さ",
   },
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -451,6 +474,14 @@ function WikiSpeedrunSurface({
   const [activeIndex, setActiveIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<SpeedrunResponse | null>(null);
+  const [progress, setProgress] = useState<SearchProgress>({
+    stage: "idle",
+    message: "",
+    percent: 0,
+  });
+  const [progressLog, setProgressLog] = useState<
+    Array<{ id: string; text: string }>
+  >([]);
   const { message, modal } = AntApp.useApp();
   const t = text[locale];
 
@@ -541,37 +572,38 @@ function WikiSpeedrunSurface({
   async function runSearch() {
     setLoading(true);
     setResult(null);
+    setProgress({
+      stage: "prepare",
+      message: t.running,
+      percent: 1,
+    });
+    setProgressLog([{ id: crypto.randomUUID(), text: t.running }]);
     setActiveIndex(0);
 
     try {
-      const response = await fetch("/api/speedrun", {
+      const response = await fetch("/api/speedrun?stream=1", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          engine: site.engine,
-          baseUrl: site.baseUrl,
-          apiEndpoint: site.apiEndpoint || undefined,
-          startTitle,
-          targetTitle,
-          includeFootnotes,
-          redirectMode,
-          namespacePolicy,
-          requiredStep: {
-            enabled: requiredEnabled,
-            position: requiredPosition,
-            title: requiredTitle,
-          },
-          search: {
-            maxDepth,
-            maxNodes,
-          },
-        }),
+        body: JSON.stringify(buildSearchRequest()),
       });
-      const payload = (await response.json()) as SpeedrunResponse;
+      const payload = response.body
+        ? await readSpeedrunStream(response.body)
+        : ((await response.json()) as SpeedrunResponse);
       setResult(payload);
       if (payload.ok) {
+        setProgress((current) => ({
+          ...current,
+          stage: "complete",
+          message: `${t.success}: ${payload.clicks}`,
+          percent: 100,
+        }));
         message.success(`${t.success}: ${payload.clicks}`);
       } else {
+        setProgress((current) => ({
+          ...current,
+          stage: "failed",
+          message: `${payload.error.code}: ${payload.error.message}`,
+        }));
         message.error(`${t.noResult}: ${payload.error.code}`);
       }
     } catch (error) {
@@ -585,6 +617,87 @@ function WikiSpeedrunSurface({
     } finally {
       setLoading(false);
     }
+  }
+
+  function buildSearchRequest() {
+    return {
+      engine: site.engine,
+      baseUrl: site.baseUrl,
+      apiEndpoint: site.apiEndpoint || undefined,
+      startTitle,
+      targetTitle,
+      includeFootnotes,
+      redirectMode,
+      namespacePolicy,
+      requiredStep: {
+        enabled: requiredEnabled,
+        position: requiredPosition,
+        title: requiredTitle,
+      },
+      search: {
+        maxDepth,
+        maxNodes,
+      },
+    };
+  }
+
+  async function readSpeedrunStream(body: ReadableStream<Uint8Array>) {
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalPayload: SpeedrunResponse | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        if (!line.trim()) {
+          continue;
+        }
+        const event = JSON.parse(line) as StreamEvent;
+        if (event.type === "progress") {
+          const nextProgress = {
+            stage: event.stage,
+            message: event.message,
+            percent: event.percent,
+            expanded: event.expanded,
+            queued: event.queued,
+            depth: event.depth,
+            title: event.title,
+          };
+          setProgress(nextProgress);
+          setProgressLog((current) =>
+            [
+              {
+                id: crypto.randomUUID(),
+                text: `${event.percent}% · ${event.message}`,
+              },
+              ...current,
+            ].slice(0, 8),
+          );
+        } else {
+          finalPayload = event.data;
+        }
+      }
+    }
+
+    if (buffer.trim()) {
+      const event = JSON.parse(buffer) as StreamEvent;
+      if (event.type === "result") {
+        finalPayload = event.data;
+      }
+    }
+
+    if (!finalPayload) {
+      throw new Error("Stream ended without a result.");
+    }
+    return finalPayload;
   }
 
   function showIframeNotice() {
@@ -877,7 +990,40 @@ function WikiSpeedrunSurface({
           </div>
           <div className={styles.panelBody}>
             {loading ? (
-              <Progress percent={65} status="active" showInfo={false} />
+              <div className={styles.progressPanel}>
+                <div className={styles.progressHeader}>
+                  <div>
+                    <div className={styles.progressTitle}>{t.progress}</div>
+                    <div className={styles.progressMessage}>
+                      {progress.message}
+                    </div>
+                  </div>
+                  <Tag color="blue">{progress.stage}</Tag>
+                </div>
+                <Progress
+                  percent={progress.percent}
+                  status="active"
+                  strokeColor={{ from: "#2563eb", to: "#16a34a" }}
+                />
+                <div className={styles.progressStats}>
+                  <span>
+                    {t.expanded}: {progress.expanded ?? 0}
+                  </span>
+                  <span>
+                    {t.queue}: {progress.queued ?? 0}
+                  </span>
+                  <span>
+                    {t.depth}: {progress.depth ?? 0}
+                  </span>
+                </div>
+                <div className={styles.progressLog}>
+                  {progressLog.map((item) => (
+                    <div key={item.id} className={styles.logLine}>
+                      {item.text}
+                    </div>
+                  ))}
+                </div>
+              </div>
             ) : null}
 
             {failure ? (
