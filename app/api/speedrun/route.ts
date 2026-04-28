@@ -34,6 +34,7 @@ type SpeedrunRequest = {
   engine: WikiEngine;
   baseUrl: string;
   apiEndpoint?: string;
+  apiToken?: string;
   startTitle: string;
   targetTitle: string;
   includeFootnotes: boolean;
@@ -97,6 +98,11 @@ type HtmlFetchResult = {
   finalUrl: string;
   html: string;
   status: number;
+};
+
+type RawFetchResult = {
+  text: string;
+  exists: boolean;
 };
 
 type ProgressUpdate = {
@@ -224,10 +230,7 @@ async function runSpeedrun(body: SpeedrunRequest, report?: ProgressReporter) {
     percent: 4,
   });
 
-  const adapter =
-    body.engine === "mediawiki"
-      ? await createMediaWikiAdapter(body)
-      : createHtmlWikiAdapter(body);
+  const adapter = await createWikiAdapter(body);
 
   report?.({
     stage: "resolve_start",
@@ -489,6 +492,50 @@ async function createMediaWikiAdapter(
   };
 }
 
+async function createWikiAdapter(request: SpeedrunRequest) {
+  if (request.engine === "mediawiki") {
+    return createMediaWikiAdapter(request);
+  }
+
+  if (request.engine === "dokuwiki") {
+    const apiAdapter = await createDokuWikiApiAdapter(request);
+    return apiAdapter ?? createHtmlWikiAdapter(request);
+  }
+
+  if (request.engine === "the-seed" && request.apiToken) {
+    return createTheSeedApiAdapter(request);
+  }
+
+  if (
+    request.engine === "the-seed" &&
+    safeUrl(request.baseUrl)?.hostname === "namu.wiki"
+  ) {
+    throw new SpeedrunError(
+      "LINK_EXTRACTION_FAILED",
+      "the seed public API requires an api_access token. Add an API token for this wiki, or use a the seed site that exposes readable server-rendered pages.",
+    );
+  }
+
+  if (request.engine === "opennamu") {
+    const apiAdapter = await createOpenNamuApiAdapter(request);
+    return apiAdapter ?? createHtmlWikiAdapter(request);
+  }
+
+  if (request.engine === "moniwiki") {
+    return createRawMarkupWikiAdapter(request, {
+      endpoint: `${request.engine}:raw:${safeUrl(request.baseUrl)?.origin ?? ""}`,
+      rawUrl: (base, title) => {
+        const url = new URL(buildHtmlPageUrl(base, title, request.engine));
+        url.searchParams.set("action", "raw");
+        return url.toString();
+      },
+      parseLinks: (text) => extractWikiMarkupLinks(text, request.engine),
+    });
+  }
+
+  return createHtmlWikiAdapter(request);
+}
+
 function createHtmlWikiAdapter(request: SpeedrunRequest): WikiAdapter {
   const base = safeUrl(request.baseUrl);
   if (!base) {
@@ -623,6 +670,411 @@ function createHtmlWikiAdapter(request: SpeedrunRequest): WikiAdapter {
     getOutgoingLinks,
     getBacklinkCount,
   };
+}
+
+async function createDokuWikiApiAdapter(
+  request: SpeedrunRequest,
+): Promise<WikiAdapter | null> {
+  const base = safeUrl(request.baseUrl);
+  if (!base) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL is not a valid http(s) URL.",
+    );
+  }
+  const wikiBase = base;
+
+  const endpoint = discoverDokuWikiJsonRpcEndpoint(
+    wikiBase,
+    request.apiEndpoint,
+  );
+  try {
+    await dokuJsonRpc(endpoint, "dokuwiki.getVersion", []);
+  } catch {
+    return null;
+  }
+
+  const pageCache = new Map<string, ResolvedPage | null>();
+
+  async function resolvePage(rawInput: string) {
+    const normalized = normalizeTitleInput(rawInput, request.baseUrl);
+    if (!normalized) {
+      return null;
+    }
+
+    const id = dokuWikiId(normalized);
+    const cacheKey = canonicalTextKey(id);
+    if (pageCache.has(cacheKey)) {
+      return pageCache.get(cacheKey) ?? null;
+    }
+
+    try {
+      await dokuJsonRpc(endpoint, "wiki.getPageInfo", [id]);
+      const page: ResolvedPage = {
+        pageId: `dokuwiki:${canonicalTextKey(id)}`,
+        title: normalizeLooseTitle(id),
+        url: buildHtmlPageUrl(wikiBase, id, request.engine),
+        ns: namespaceGuess(id.replace(/:/g, " ")),
+        inputTitle: rawInput,
+      };
+      pageCache.set(cacheKey, page);
+      return page;
+    } catch {
+      pageCache.set(cacheKey, null);
+      return null;
+    }
+  }
+
+  async function getOutgoingLinks(page: ResolvedPage) {
+    const links = await dokuJsonRpc(endpoint, "wiki.listLinks", [
+      dokuWikiId(page.title),
+    ]);
+    const titles = (Array.isArray(links) ? links : [])
+      .map((link) =>
+        typeof link === "string"
+          ? link
+          : typeof link?.page === "string"
+            ? link.page
+            : typeof link?.id === "string"
+              ? link.id
+              : "",
+      )
+      .filter(Boolean);
+
+    return resolveRawLinksToCandidates(titles, page, request, resolvePage);
+  }
+
+  async function getBacklinkCount(target: ResolvedPage) {
+    try {
+      const backlinks = await dokuJsonRpc(endpoint, "wiki.getBackLinks", [
+        dokuWikiId(target.title),
+      ]);
+      return Array.isArray(backlinks)
+        ? backlinks.filter((title) =>
+            namespaceAllowed(
+              namespaceGuess(String(title)),
+              request.namespacePolicy,
+            ),
+          ).length
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  return {
+    endpoint,
+    backlinkMode: "api",
+    resolvePage,
+    getOutgoingLinks,
+    getBacklinkCount,
+  };
+}
+
+function createTheSeedApiAdapter(request: SpeedrunRequest): WikiAdapter {
+  const base = safeUrl(request.baseUrl);
+  if (!base) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL is not a valid http(s) URL.",
+    );
+  }
+  const endpoint =
+    request.apiEndpoint?.trim() ||
+    (base.hostname === "namu.wiki"
+      ? "https://wiki-api.namu.la/api"
+      : new URL("/api", base.origin).toString());
+
+  return createRawMarkupWikiAdapter(request, {
+    endpoint,
+    backlinkMode: "api",
+    rawUrl: (_base, title) =>
+      `${endpoint.replace(/\/+$/g, "")}/edit/${encodeTitlePath(title)}`,
+    rawFetcher: async (url) => {
+      const data = (await cachedJsonWithHeaders(url, {
+        authorization: `Bearer ${request.apiToken}`,
+      })) as { text?: string; exists?: boolean };
+      return {
+        text: data.text ?? "",
+        exists: data.exists === true,
+      };
+    },
+    backlinkCount: async (target) => {
+      const url = `${endpoint.replace(/\/+$/g, "")}/backlink/${encodeTitlePath(
+        target.title,
+      )}`;
+      const data = (await cachedJsonWithHeaders(url, {
+        authorization: `Bearer ${request.apiToken}`,
+      })) as {
+        backlinks?: Array<{ document?: string; flags?: string }>;
+      };
+      return (data.backlinks ?? []).filter((item) =>
+        namespaceAllowed(
+          namespaceGuess(item.document ?? ""),
+          request.namespacePolicy,
+        ),
+      ).length;
+    },
+    parseLinks: (text) => extractWikiMarkupLinks(text, request.engine),
+  });
+}
+
+async function createOpenNamuApiAdapter(
+  request: SpeedrunRequest,
+): Promise<WikiAdapter | null> {
+  const base = safeUrl(request.baseUrl);
+  if (!base) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL is not a valid http(s) URL.",
+    );
+  }
+
+  const endpoint =
+    request.apiEndpoint?.trim() || new URL("/api", base.origin).toString();
+  try {
+    const pingUrl = `${endpoint.replace(/\/+$/g, "")}/raw_exist/${encodeTitlePath(
+      "FrontPage",
+    )}`;
+    await cachedJson(pingUrl);
+  } catch {
+    return null;
+  }
+
+  return createRawMarkupWikiAdapter(request, {
+    endpoint,
+    rawUrl: (_base, title) =>
+      `${endpoint.replace(/\/+$/g, "")}/raw/${encodeTitlePath(title)}`,
+    rawFetcher: async (url) => {
+      const data = (await cachedJson(url)) as {
+        data?: string;
+        response?: string;
+      };
+      return {
+        text: data.data ?? "",
+        exists: data.response === "ok",
+      };
+    },
+    parseLinks: (text) => extractWikiMarkupLinks(text, request.engine),
+  });
+}
+
+function createRawMarkupWikiAdapter(
+  request: SpeedrunRequest,
+  options: {
+    endpoint: string;
+    backlinkMode?: WikiAdapter["backlinkMode"];
+    rawUrl: (base: URL, title: string) => string;
+    rawFetcher?: (url: string) => Promise<RawFetchResult>;
+    backlinkCount?: (target: ResolvedPage) => Promise<number | null>;
+    parseLinks: (text: string) => string[];
+  },
+): WikiAdapter {
+  const base = safeUrl(request.baseUrl);
+  if (!base) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL is not a valid http(s) URL.",
+    );
+  }
+  const wikiBase = base;
+  const pageCache = new Map<string, ResolvedPage | null>();
+  const rawCache = new Map<string, RawFetchResult>();
+  const fetchRaw = options.rawFetcher ?? fetchPlainRaw;
+
+  async function getRaw(title: string) {
+    const key = canonicalTextKey(title);
+    const cached = rawCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const result = await fetchRaw(options.rawUrl(wikiBase, title));
+    rawCache.set(key, result);
+    return result;
+  }
+
+  async function resolvePage(rawInput: string): Promise<ResolvedPage | null> {
+    const normalized = normalizeTitleInput(rawInput, request.baseUrl);
+    if (!normalized) {
+      return null;
+    }
+
+    const cacheKey = canonicalTextKey(normalized);
+    if (pageCache.has(cacheKey)) {
+      return pageCache.get(cacheKey) ?? null;
+    }
+
+    const raw = await getRaw(normalized);
+    if (!raw.exists) {
+      pageCache.set(cacheKey, null);
+      return null;
+    }
+
+    const redirectTitle = extractRedirectTarget(raw.text);
+    if (redirectTitle && !titlesEqual(redirectTitle, normalized)) {
+      const redirected: ResolvedPage | null = await resolvePage(redirectTitle);
+      if (redirected) {
+        const page: ResolvedPage = {
+          ...redirected,
+          inputTitle: rawInput,
+          redirectedFrom: normalized,
+        };
+        pageCache.set(cacheKey, page);
+        return page;
+      }
+    }
+
+    const page: ResolvedPage = {
+      pageId: `${request.engine}:${canonicalTextKey(normalized)}`,
+      title: normalizeLooseTitle(normalized),
+      url: buildHtmlPageUrl(wikiBase, normalized, request.engine),
+      ns: namespaceGuess(normalized),
+      inputTitle: rawInput,
+    };
+    pageCache.set(cacheKey, page);
+    pageCache.set(canonicalTextKey(page.title), page);
+    return page;
+  }
+
+  async function getOutgoingLinks(page: ResolvedPage) {
+    const raw = await getRaw(page.title);
+    if (!raw.exists) {
+      throw new SpeedrunError(
+        "LINK_EXTRACTION_FAILED",
+        "Could not extract valid page links.",
+      );
+    }
+    const text = request.includeFootnotes
+      ? raw.text
+      : stripWikiMarkupFootnotes(raw.text);
+    const titles = options.parseLinks(text);
+    return resolveRawLinksToCandidates(titles, page, request, resolvePage);
+  }
+
+  async function getBacklinkCount(target: ResolvedPage) {
+    if (options.backlinkCount) {
+      return options.backlinkCount(target);
+    }
+    return createHtmlWikiAdapter(request).getBacklinkCount(target);
+  }
+
+  return {
+    endpoint: options.endpoint,
+    backlinkMode: options.backlinkMode ?? "best_effort",
+    resolvePage,
+    getOutgoingLinks,
+    getBacklinkCount,
+  };
+}
+
+async function fetchPlainRaw(url: string): Promise<RawFetchResult> {
+  const response = await throttledFetch(
+    url,
+    { accept: "text/plain,*/*" },
+    true,
+  );
+  const text = await decodeResponseText(response);
+  return {
+    text,
+    exists: response.ok && !looksLikeHtmlShell(text),
+  };
+}
+
+function discoverDokuWikiJsonRpcEndpoint(base: URL, explicitEndpoint?: string) {
+  if (explicitEndpoint) {
+    return explicitEndpoint;
+  }
+  const url = new URL(base.toString());
+  if (!url.pathname.endsWith("/lib/exe/jsonrpc.php")) {
+    url.pathname = joinPath(url.pathname, "lib/exe/jsonrpc.php");
+  }
+  url.search = "";
+  return url.toString();
+}
+
+async function dokuJsonRpc(
+  endpoint: string,
+  method: string,
+  params: unknown[],
+) {
+  const requestUrl = new URL(endpoint);
+  await scheduleHost(requestUrl.origin);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    cache: "no-store",
+    signal: AbortSignal.timeout(12_000),
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "user-agent": userAgent,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "wiki-speedrun",
+      method,
+      params,
+    }),
+  });
+  if (response.status === 429) {
+    throw new SpeedrunError(
+      "SITE_RATE_LIMITED",
+      "The wiki API returned HTTP 429.",
+    );
+  }
+  if (!response.ok) {
+    throw new SpeedrunError(
+      response.status === 404 ? "INVALID_WIKI_SITE" : "NETWORK_ERROR",
+      `The wiki server returned HTTP ${response.status}.`,
+    );
+  }
+  const data = (await response.json()) as {
+    result?: unknown;
+    error?: { message?: string };
+  };
+  if (data.error) {
+    throw new SpeedrunError(
+      "NETWORK_ERROR",
+      data.error.message ?? "DokuWiki JSON-RPC error.",
+    );
+  }
+  return data.result;
+}
+
+async function resolveRawLinksToCandidates(
+  titles: string[],
+  page: ResolvedPage,
+  request: SpeedrunRequest,
+  resolvePage: (rawInput: string) => Promise<ResolvedPage | null>,
+) {
+  const candidates: Candidate[] = [];
+  const seen = new Set<string>();
+
+  for (const title of titles.slice(0, 180)) {
+    if (!namespaceAllowed(namespaceGuess(title), request.namespacePolicy)) {
+      continue;
+    }
+    if (titlesEqual(title, page.title)) {
+      continue;
+    }
+
+    const resolved = await resolvePage(title);
+    if (
+      !resolved ||
+      resolved.pageId === page.pageId ||
+      seen.has(resolved.pageId)
+    ) {
+      continue;
+    }
+
+    candidates.push({
+      page: resolved,
+      linkTitle: title,
+      redirected: Boolean(resolved.redirectedFrom),
+    });
+    seen.add(resolved.pageId);
+  }
+
+  return candidates;
 }
 
 async function discoverMediaWikiEndpoint(
@@ -878,7 +1330,21 @@ async function mwApi(endpoint: string, params: Record<string, string>) {
 }
 
 async function cachedJson(url: string) {
-  const cached = jsonCache.get(url);
+  return cachedJsonWithHeaders(url, {});
+}
+
+async function cachedJsonWithHeaders(
+  url: string,
+  extraHeaders: Record<string, string | undefined>,
+) {
+  const requestHeaders = Object.fromEntries(
+    Object.entries(extraHeaders).filter((entry): entry is [string, string] =>
+      Boolean(entry[1]),
+    ),
+  );
+  const headerKey = JSON.stringify(requestHeaders);
+  const cacheKey = `${url}#${headerKey}`;
+  const cached = jsonCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) {
     return cached.value as {
       query?: {
@@ -894,6 +1360,7 @@ async function cachedJson(url: string) {
   const response = await throttledFetch(url, {
     accept: "application/json",
     "api-user-agent": userAgent,
+    ...requestHeaders,
   });
   const data = await response.json();
   if (data.error) {
@@ -902,7 +1369,7 @@ async function cachedJson(url: string) {
       data.error.info ?? "MediaWiki API error.",
     );
   }
-  jsonCache.set(url, { expires: Date.now() + 1000 * 60 * 8, value: data });
+  jsonCache.set(cacheKey, { expires: Date.now() + 1000 * 60 * 8, value: data });
   return data;
 }
 
@@ -921,7 +1388,7 @@ async function fetchHtml(url: string) {
   );
   const value = {
     finalUrl: response.url || url,
-    html: await response.text(),
+    html: await decodeResponseText(response),
     status: response.status,
   };
   htmlCache.set(url, { expires: Date.now() + 1000 * 60 * 6, value });
@@ -981,6 +1448,19 @@ async function throttledFetch(
   );
 }
 
+async function decodeResponseText(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+  const charset =
+    contentType.match(/charset=([^;\s]+)/i)?.[1]?.toLocaleLowerCase() ??
+    "utf-8";
+  const buffer = await response.arrayBuffer();
+  try {
+    return new TextDecoder(charset).decode(buffer);
+  } catch {
+    return new TextDecoder("utf-8").decode(buffer);
+  }
+}
+
 async function scheduleHost(origin: string) {
   const interval = origin.includes("wikipedia.org") ? 260 : 120;
   const now = Date.now();
@@ -1037,6 +1517,7 @@ function normalizeRequest(request: SpeedrunRequest): SpeedrunRequest {
     targetTitle: request.targetTitle.trim(),
     baseUrl: request.baseUrl.trim(),
     apiEndpoint: request.apiEndpoint?.trim(),
+    apiToken: request.apiToken?.trim(),
     search: {
       maxDepth: clamp(Math.trunc(request.search.maxDepth || 1), 1, 8),
       maxNodes: clamp(Math.trunc(request.search.maxNodes || 80), 10, 1200),
@@ -1446,6 +1927,74 @@ function stripReferenceHtml(html: string) {
       /<span\b[^>]*class=["'][^"']*mw-ref[^"']*["'][\s\S]*?<\/span>/gi,
       "",
     );
+}
+
+function extractWikiMarkupLinks(text: string, engine: WikiEngine) {
+  const links: string[] = [];
+  const doubleBracketPattern = /\[\[([^\]\n]+?)\]\]/g;
+  let match = doubleBracketPattern.exec(text);
+  while (match) {
+    const target = cleanWikiMarkupTarget(match[1] ?? "");
+    if (target) {
+      links.push(target);
+    }
+    match = doubleBracketPattern.exec(text);
+  }
+
+  if (engine === "moniwiki") {
+    const singleBracketPattern = /(^|[^[])\[([^\n|]{2,120})\]/g;
+    let singleMatch = singleBracketPattern.exec(text);
+    while (singleMatch) {
+      const target = cleanWikiMarkupTarget(singleMatch[2] ?? "");
+      if (target) {
+        links.push(target);
+      }
+      singleMatch = singleBracketPattern.exec(text);
+    }
+  }
+
+  return [...new Set(links)];
+}
+
+function cleanWikiMarkupTarget(rawTarget: string) {
+  const target = normalizeLooseTitle(
+    rawTarget.split("|")[0]?.split("#")[0]?.replace(/^:/, "").trim(),
+  );
+  if (
+    !target ||
+    target.includes("://") ||
+    target.includes("[") ||
+    target.includes("]") ||
+    target.startsWith("#") ||
+    /^\w+\(/.test(target)
+  ) {
+    return "";
+  }
+  return target;
+}
+
+function stripWikiMarkupFootnotes(text: string) {
+  return text.replace(/\[\*[\s\S]*?\]/g, "");
+}
+
+function extractRedirectTarget(text: string) {
+  const firstContentLine =
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("//")) ?? "";
+  const match =
+    firstContentLine.match(/^#(?:redirect|넘겨주기)\s+\[\[([^\]]+)\]\]/i) ??
+    firstContentLine.match(/^#(?:redirect|넘겨주기)\s+(.+)$/i);
+  return cleanWikiMarkupTarget(match?.[1] ?? "");
+}
+
+function looksLikeHtmlShell(text: string) {
+  return /^\s*<!doctype html|^\s*<html[\s>]/i.test(text);
+}
+
+function dokuWikiId(title: string) {
+  return normalizeLooseTitle(title).replace(/\s+/g, "_").toLocaleLowerCase();
 }
 
 function namespaceGuess(title: string) {

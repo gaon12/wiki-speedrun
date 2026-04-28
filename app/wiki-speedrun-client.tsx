@@ -66,6 +66,7 @@ type LocalSettings = {
   siteKey: string;
   customBaseUrl: string;
   customApiEndpoint: string;
+  customApiToken: string;
   customEngine: WikiEngine;
   startTitle: string;
   targetTitle: string;
@@ -162,12 +163,14 @@ const presets: PresetSite[] = [
     label: "나무위키",
     engine: "the-seed",
     baseUrl: "https://namu.wiki/w/",
+    apiEndpoint: "https://wiki-api.namu.la/api",
   },
   {
     key: "opennamu-onts",
     label: "openNAMU ONTS",
     engine: "opennamu",
     baseUrl: "https://openna.mu.io.kr/w/",
+    apiEndpoint: "https://openna.mu.io.kr/api",
   },
   {
     key: "dokuwiki",
@@ -204,7 +207,8 @@ const text = {
     setupDesc: "출발/도착 문서와 위키 엔진 옵션을 정합니다.",
     wiki: "위키 사이트",
     customBase: "사용자 사이트 URL",
-    customApi: "MediaWiki API URL",
+    customApi: "API URL",
+    apiToken: "API 토큰",
     engine: "엔진",
     start: "출발 문서",
     target: "도착 문서",
@@ -227,7 +231,7 @@ const text = {
     resultDesc: "가장 먼저 발견된 최단 경로를 문서 노드와 링크로 표시합니다.",
     emptyTitle: "아직 경로를 찾지 않았습니다.",
     emptyCopy:
-      "MediaWiki는 API로, the seed/openNAMU/DokuWiki/MoniWiki는 HTML 링크 추출로 탐색합니다. 큰 위키에서는 최대 탐색 문서를 낮게 시작하는 편이 좋습니다.",
+      "MediaWiki, DokuWiki, openNAMU는 가능한 경우 API를 우선 사용합니다. the seed API는 토큰이 필요하며, MoniWiki는 RAW 문서 기반으로 탐색합니다.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -253,7 +257,8 @@ const text = {
     setupDesc: "Choose documents, wiki engine, and route rules.",
     wiki: "Wiki site",
     customBase: "Custom site URL",
-    customApi: "MediaWiki API URL",
+    customApi: "API URL",
+    apiToken: "API token",
     engine: "Engine",
     start: "Start document",
     target: "Target document",
@@ -277,7 +282,7 @@ const text = {
       "The first shortest path found is shown as page nodes and links.",
     emptyTitle: "No route yet.",
     emptyCopy:
-      "MediaWiki uses its API; the seed/openNAMU/DokuWiki/MoniWiki use HTML link extraction. Start with a lower page limit on large wikis.",
+      "MediaWiki, DokuWiki, and openNAMU prefer APIs when available. the seed requires an API token; MoniWiki uses RAW pages.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -302,7 +307,8 @@ const text = {
     setupDesc: "文書、Wikiエンジン、探索ルールを選びます。",
     wiki: "Wikiサイト",
     customBase: "カスタムサイトURL",
-    customApi: "MediaWiki API URL",
+    customApi: "API URL",
+    apiToken: "APIトークン",
     engine: "エンジン",
     start: "開始文書",
     target: "到着文書",
@@ -325,7 +331,7 @@ const text = {
     resultDesc: "最初に見つかった最短経路を文書ノードとリンクで表示します。",
     emptyTitle: "まだ経路がありません。",
     emptyCopy:
-      "MediaWikiはAPI、the seed/openNAMU/DokuWiki/MoniWikiはHTMLリンク抽出で探索します。大きなWikiでは探索上限を低めにしてください。",
+      "MediaWiki、DokuWiki、openNAMUは可能な場合APIを優先します。the seed APIにはトークンが必要で、MoniWikiはRAW文書を使います。",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -371,6 +377,7 @@ const defaultLocalSettings: LocalSettings = {
   siteKey: "ko-wikipedia",
   customBaseUrl: "",
   customApiEndpoint: "",
+  customApiToken: "",
   customEngine: "mediawiki",
   startTitle: "대한민국",
   targetTitle: "철학",
@@ -441,6 +448,9 @@ function WikiSpeedrunSurface({
   const [customApiEndpoint, setCustomApiEndpoint] = useState(
     defaultLocalSettings.customApiEndpoint,
   );
+  const [customApiToken, setCustomApiToken] = useState(
+    defaultLocalSettings.customApiToken,
+  );
   const [customEngine, setCustomEngine] = useState<WikiEngine>(
     defaultLocalSettings.customEngine,
   );
@@ -493,10 +503,18 @@ function WikiSpeedrunSurface({
         engine: customEngine,
         baseUrl: customBaseUrl,
         apiEndpoint: customApiEndpoint,
+        apiToken: customApiToken,
       };
     }
-    return selectedPreset;
-  }, [customApiEndpoint, customBaseUrl, customEngine, selectedPreset, siteKey]);
+    return { ...selectedPreset, apiToken: customApiToken };
+  }, [
+    customApiEndpoint,
+    customApiToken,
+    customBaseUrl,
+    customEngine,
+    selectedPreset,
+    siteKey,
+  ]);
 
   const success = result?.ok ? result : null;
   const failure = result && !result.ok ? result : null;
@@ -509,6 +527,7 @@ function WikiSpeedrunSurface({
     setSiteKey(saved.siteKey);
     setCustomBaseUrl(saved.customBaseUrl);
     setCustomApiEndpoint(saved.customApiEndpoint);
+    setCustomApiToken(saved.customApiToken);
     setCustomEngine(saved.customEngine);
     setStartTitle(saved.startTitle);
     setTargetTitle(saved.targetTitle);
@@ -535,6 +554,7 @@ function WikiSpeedrunSurface({
       siteKey,
       customBaseUrl,
       customApiEndpoint,
+      customApiToken,
       customEngine,
       startTitle,
       targetTitle,
@@ -550,6 +570,7 @@ function WikiSpeedrunSurface({
     });
   }, [
     customApiEndpoint,
+    customApiToken,
     customBaseUrl,
     customEngine,
     includeFootnotes,
@@ -624,6 +645,7 @@ function WikiSpeedrunSurface({
       engine: site.engine,
       baseUrl: site.baseUrl,
       apiEndpoint: site.apiEndpoint || undefined,
+      apiToken: site.apiToken || undefined,
       startTitle,
       targetTitle,
       includeFootnotes,
@@ -812,18 +834,48 @@ function WikiSpeedrunSurface({
                       placeholder="https://example.org/w/api.php"
                     />
                   </div>
+                  <div>
+                    <span className={styles.fieldLabel}>{t.apiToken}</span>
+                    <Input.Password
+                      prefix={<ApiOutlined />}
+                      value={customApiToken}
+                      onChange={(event) =>
+                        setCustomApiToken(event.target.value)
+                      }
+                      placeholder="Bearer token"
+                    />
+                  </div>
                 </>
               ) : (
-                <Alert
-                  showIcon
-                  type="success"
-                  title={`${site.label} / ${site.engine}`}
-                  description={
-                    site.engine === "mediawiki"
-                      ? site.baseUrl
-                      : `${site.baseUrl} · HTML adapter`
-                  }
-                />
+                <>
+                  <Alert
+                    showIcon
+                    type="success"
+                    title={`${site.label} / ${site.engine}`}
+                    description={
+                      site.apiEndpoint
+                        ? `${site.apiEndpoint} · API preferred`
+                        : `${site.baseUrl} · RAW/HTML fallback`
+                    }
+                  />
+                  {site.engine !== "mediawiki" ? (
+                    <div>
+                      <span className={styles.fieldLabel}>{t.apiToken}</span>
+                      <Input.Password
+                        prefix={<ApiOutlined />}
+                        value={customApiToken}
+                        onChange={(event) =>
+                          setCustomApiToken(event.target.value)
+                        }
+                        placeholder={
+                          site.engine === "the-seed"
+                            ? "the seed API token"
+                            : "optional"
+                        }
+                      />
+                    </div>
+                  ) : null}
+                </>
               )}
 
               <div className={styles.splitFields}>
@@ -1295,6 +1347,10 @@ function sanitizeLocalSettings(value: unknown): LocalSettings {
     customApiEndpoint: stringOrDefault(
       candidate.customApiEndpoint,
       defaultLocalSettings.customApiEndpoint,
+    ),
+    customApiToken: stringOrDefault(
+      candidate.customApiToken,
+      defaultLocalSettings.customApiToken,
     ),
     customEngine,
     startTitle: stringOrDefault(
