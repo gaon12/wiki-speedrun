@@ -371,6 +371,11 @@ const localeLabels: Record<Locale, string> = {
 export default function WikiSpeedrunClient() {
   const [mode, setMode] = useState<ColorMode>("light");
 
+  useEffect(() => {
+    document.documentElement.dataset.theme = mode;
+    document.documentElement.style.colorScheme = mode;
+  }, [mode]);
+
   return (
     <ConfigProvider
       theme={{
@@ -379,6 +384,11 @@ export default function WikiSpeedrunClient() {
         token: {
           borderRadius: 8,
           colorPrimary: "#2563eb",
+          colorBgBase: mode === "dark" ? "#10151d" : "#f4f7fb",
+          colorBgContainer: mode === "dark" ? "#151c26" : "#ffffff",
+          colorBorder: mode === "dark" ? "#293444" : "#dbe3ef",
+          colorTextBase: mode === "dark" ? "#e7edf7" : "#172033",
+          colorTextSecondary: mode === "dark" ? "#9aa8bd" : "#667085",
           fontFamily: "var(--font-geist-sans), Arial, sans-serif",
         },
       }}
@@ -585,7 +595,11 @@ function WikiSpeedrunSurface({
   }
 
   return (
-    <div className={styles.shell}>
+    <div
+      className={`${styles.shell} ${
+        mode === "dark" ? styles.darkShell : styles.lightShell
+      }`}
+    >
       <header className={styles.header}>
         <div className={styles.headerInner}>
           <div className={styles.brand}>

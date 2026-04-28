@@ -1,37 +1,16 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
-  --app-background: #f4f7fb;
-  --app-foreground: #172033;
-  --app-muted: #667085;
-  --app-surface: #ffffff;
-  --app-subtle: #f8fafc;
-  --app-border: #dbe3ef;
-  --app-border-strong: #b8c4d6;
-  --app-grid: rgba(100, 116, 139, 0.12);
-  --app-node-border: #b6c6dc;
-  --app-selection: #eaf2ff;
-  --app-link: #1d4ed8;
-  --app-shadow: 0 18px 55px rgba(25, 38, 64, 0.08);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-    --app-background: #10151d;
-    --app-foreground: #e7edf7;
-    --app-muted: #9aa8bd;
-    --app-surface: #151c26;
-    --app-subtle: #111821;
-    --app-border: #293444;
-    --app-border-strong: #3b4a5f;
-    --app-grid: rgba(148, 163, 184, 0.1);
-    --app-node-border: #42536b;
-    --app-selection: #172946;
-    --app-link: #8ab4ff;
-    --app-shadow: 0 18px 55px rgba(0, 0, 0, 0.24);
-  }
+html[data-theme="dark"] {
+  --background: #10151d;
+  --foreground: #e7edf7;
+}
+
+html[data-theme="light"] {
+  --background: #ffffff;
+  --foreground: #171717;
 }
 
 html {
@@ -64,10 +43,4 @@ body {
 a {
   color: inherit;
   text-decoration: none;
-}
-
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
 }

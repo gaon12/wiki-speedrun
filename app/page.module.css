@@ -1,4 +1,19 @@
 .shell {
+  --app-background: #f4f7fb;
+  --app-foreground: #172033;
+  --app-muted: #667085;
+  --app-surface: #ffffff;
+  --app-surface-rgb: 255, 255, 255;
+  --app-subtle: #f8fafc;
+  --app-border: #dbe3ef;
+  --app-border-strong: #b8c4d6;
+  --app-grid: rgba(100, 116, 139, 0.12);
+  --app-node-border: #b6c6dc;
+  --app-selection: #eaf2ff;
+  --app-link: #1d4ed8;
+  --app-shadow: 0 18px 55px rgba(25, 38, 64, 0.08);
+  --app-node-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+
   min-height: 100vh;
   background:
     radial-gradient(
@@ -12,6 +27,43 @@
       transparent 24rem
     ), var(--app-background);
   color: var(--app-foreground);
+  color-scheme: light;
+}
+
+.lightShell {
+  --app-background: #f4f7fb;
+  --app-foreground: #172033;
+  --app-muted: #667085;
+  --app-surface: #ffffff;
+  --app-surface-rgb: 255, 255, 255;
+  --app-subtle: #f8fafc;
+  --app-border: #dbe3ef;
+  --app-border-strong: #b8c4d6;
+  --app-grid: rgba(100, 116, 139, 0.12);
+  --app-node-border: #b6c6dc;
+  --app-selection: #eaf2ff;
+  --app-link: #1d4ed8;
+  --app-shadow: 0 18px 55px rgba(25, 38, 64, 0.08);
+  --app-node-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  color-scheme: light;
+}
+
+.darkShell {
+  --app-background: #10151d;
+  --app-foreground: #e7edf7;
+  --app-muted: #9aa8bd;
+  --app-surface: #151c26;
+  --app-surface-rgb: 21, 28, 38;
+  --app-subtle: #111821;
+  --app-border: #293444;
+  --app-border-strong: #3b4a5f;
+  --app-grid: rgba(148, 163, 184, 0.1);
+  --app-node-border: #42536b;
+  --app-selection: #172946;
+  --app-link: #8ab4ff;
+  --app-shadow: 0 18px 55px rgba(0, 0, 0, 0.24);
+  --app-node-shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
+  color-scheme: dark;
 }
 
 .header {
@@ -19,7 +71,7 @@
   top: 0;
   z-index: 20;
   border-bottom: 1px solid var(--app-border);
-  background: color-mix(in srgb, var(--app-surface) 92%, transparent);
+  background: rgba(var(--app-surface-rgb), 0.92);
   backdrop-filter: blur(18px);
 }
 
@@ -238,7 +290,7 @@
   padding: 12px;
   background: var(--app-surface);
   color: var(--app-foreground);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  box-shadow: var(--app-node-shadow, 0 10px 24px rgba(15, 23, 42, 0.08));
 }
 
 .pathNodeActive {
