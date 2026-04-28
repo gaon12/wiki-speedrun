@@ -69,7 +69,7 @@ type PresetSite = {
 
 type PathNode = {
   id: string;
-  pageId: number | null;
+  pageId: string | null;
   title: string;
   url: string;
   kind: "page" | "redirect";
@@ -83,13 +83,14 @@ type SpeedrunResponse =
       path: PathNode[];
       clicks: number;
       expanded: number;
+      backlinkMode: "api" | "html" | "best_effort";
       checks: {
         startOutLinks: number;
-        targetBacklinks: number;
+        targetBacklinks: number | null;
       };
-      start: { pageId: number; title: string; url: string };
-      target: { pageId: number; title: string; url: string };
-      required: { pageId: number; title: string; url: string } | null;
+      start: { pageId: string; title: string; url: string };
+      target: { pageId: string; title: string; url: string };
+      required: { pageId: string; title: string; url: string } | null;
     }
   | {
       ok: false;
@@ -126,6 +127,24 @@ const presets: PresetSite[] = [
     label: "나무위키",
     engine: "the-seed",
     baseUrl: "https://namu.wiki/w/",
+  },
+  {
+    key: "opennamu-onts",
+    label: "openNAMU ONTS",
+    engine: "opennamu",
+    baseUrl: "https://openna.mu.io.kr/w/",
+  },
+  {
+    key: "dokuwiki",
+    label: "DokuWiki.org",
+    engine: "dokuwiki",
+    baseUrl: "https://www.dokuwiki.org/",
+  },
+  {
+    key: "moniwiki-kldp",
+    label: "MoniWiki KLDP",
+    engine: "moniwiki",
+    baseUrl: "https://wiki.kldp.org/wiki.php/",
   },
   {
     key: "custom",
@@ -173,7 +192,7 @@ const text = {
     resultDesc: "가장 먼저 발견된 최단 경로를 문서 노드와 링크로 표시합니다.",
     emptyTitle: "아직 경로를 찾지 않았습니다.",
     emptyCopy:
-      "MediaWiki 사이트와 문서를 입력한 뒤 경로 찾기를 실행하세요. the seed 등은 UI 흐름만 준비되어 있고 서버 어댑터는 다음 단계입니다.",
+      "MediaWiki는 API로, the seed/openNAMU/DokuWiki/MoniWiki는 HTML 링크 추출로 탐색합니다. 큰 위키에서는 최대 탐색 문서를 낮게 시작하는 편이 좋습니다.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -184,6 +203,7 @@ const text = {
     outLinks: "출발 링크",
     backlinks: "도착 백링크",
     endpoint: "API",
+    backlinkMode: "백링크 확인",
     noResult: "실패",
     success: "성공",
     errorCode: "오류 코드",
@@ -219,7 +239,7 @@ const text = {
       "The first shortest path found is shown as page nodes and links.",
     emptyTitle: "No route yet.",
     emptyCopy:
-      "Enter a MediaWiki site and two documents, then run the search. Other engines are wired in the UI and ready for later adapters.",
+      "MediaWiki uses its API; the seed/openNAMU/DokuWiki/MoniWiki use HTML link extraction. Start with a lower page limit on large wikis.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -230,6 +250,7 @@ const text = {
     outLinks: "Start links",
     backlinks: "Target backlinks",
     endpoint: "API",
+    backlinkMode: "Backlink check",
     noResult: "Failed",
     success: "Success",
     errorCode: "Error code",
@@ -263,7 +284,7 @@ const text = {
     resultDesc: "最初に見つかった最短経路を文書ノードとリンクで表示します。",
     emptyTitle: "まだ経路がありません。",
     emptyCopy:
-      "MediaWikiサイトと文書を入力して検索してください。他のエンジンはUIのみ準備済みです。",
+      "MediaWikiはAPI、the seed/openNAMU/DokuWiki/MoniWikiはHTMLリンク抽出で探索します。大きなWikiでは探索上限を低めにしてください。",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -274,6 +295,7 @@ const text = {
     outLinks: "開始リンク",
     backlinks: "到着バックリンク",
     endpoint: "API",
+    backlinkMode: "バックリンク確認",
     noResult: "失敗",
     success: "成功",
     errorCode: "エラーコード",
@@ -516,12 +538,12 @@ function WikiSpeedrunSurface({
               ) : (
                 <Alert
                   showIcon
-                  type={site.engine === "mediawiki" ? "success" : "warning"}
+                  type="success"
                   title={`${site.label} / ${site.engine}`}
                   description={
                     site.engine === "mediawiki"
                       ? site.baseUrl
-                      : "Engine adapter is not implemented yet."
+                      : `${site.baseUrl} · HTML adapter`
                   }
                 />
               )}
@@ -724,7 +746,7 @@ function WikiSpeedrunSurface({
                   <Metric
                     icon={<ApartmentOutlined />}
                     label={t.backlinks}
-                    value={success.checks.targetBacklinks}
+                    value={success.checks.targetBacklinks ?? "best effort"}
                   />
                 </div>
 
@@ -737,6 +759,9 @@ function WikiSpeedrunSurface({
                     <Space direction="vertical" size={2}>
                       <Typography.Text type="secondary">
                         {t.endpoint}: {success.endpoint}
+                      </Typography.Text>
+                      <Typography.Text type="secondary">
+                        {t.backlinkMode}: {success.backlinkMode}
                       </Typography.Text>
                       {success.required ? (
                         <Typography.Text type="secondary">
@@ -876,7 +901,7 @@ function Metric({
 }: {
   icon: ReactNode;
   label: string;
-  value: number;
+  value: number | string;
 }) {
   return (
     <div className={styles.metric}>
