@@ -261,9 +261,21 @@ async function findPath(
       );
     }
 
-    const links =
-      linkCache.get(entry.current.pageId) ??
-      (await adapter.getOutgoingLinks(entry.current));
+    let links: Candidate[];
+    try {
+      links =
+        linkCache.get(entry.current.pageId) ??
+        (await adapter.getOutgoingLinks(entry.current));
+    } catch (error) {
+      if (
+        error instanceof SpeedrunError &&
+        error.code === "LINK_EXTRACTION_FAILED" &&
+        entry.current.pageId !== start.pageId
+      ) {
+        continue;
+      }
+      throw error;
+    }
     linkCache.set(entry.current.pageId, links);
 
     for (const candidate of links) {
