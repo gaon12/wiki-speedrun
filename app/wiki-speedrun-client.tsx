@@ -66,7 +66,6 @@ type LocalSettings = {
   siteKey: string;
   customBaseUrl: string;
   customApiEndpoint: string;
-  customApiToken: string;
   customEngine: WikiEngine;
   startTitle: string;
   targetTitle: string;
@@ -231,7 +230,7 @@ const text = {
     resultDesc: "가장 먼저 발견된 최단 경로를 문서 노드와 링크로 표시합니다.",
     emptyTitle: "아직 경로를 찾지 않았습니다.",
     emptyCopy:
-      "MediaWiki, DokuWiki, openNAMU는 가능한 경우 API를 우선 사용합니다. the seed API는 토큰이 필요하며, MoniWiki는 RAW 문서 기반으로 탐색합니다.",
+      "MediaWiki, DokuWiki, openNAMU는 가능한 경우 API를 우선 사용합니다. the seed는 토큰 없이 공개 HTML로도 탐색하며, 토큰이 있으면 API를 사용합니다.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -282,7 +281,7 @@ const text = {
       "The first shortest path found is shown as page nodes and links.",
     emptyTitle: "No route yet.",
     emptyCopy:
-      "MediaWiki, DokuWiki, and openNAMU prefer APIs when available. the seed requires an API token; MoniWiki uses RAW pages.",
+      "MediaWiki, DokuWiki, and openNAMU prefer APIs when available. the seed can search public HTML without a token and uses the API when a token is supplied.",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -331,7 +330,7 @@ const text = {
     resultDesc: "最初に見つかった最短経路を文書ノードとリンクで表示します。",
     emptyTitle: "まだ経路がありません。",
     emptyCopy:
-      "MediaWiki、DokuWiki、openNAMUは可能な場合APIを優先します。the seed APIにはトークンが必要で、MoniWikiはRAW文書を使います。",
+      "MediaWiki、DokuWiki、openNAMUは可能な場合APIを優先します。the seedはトークンなしの公開HTML探索に対応し、トークンがある場合はAPIを使います。",
     iframe: "GUI",
     compact: "URL",
     iframeWarning:
@@ -377,7 +376,6 @@ const defaultLocalSettings: LocalSettings = {
   siteKey: "ko-wikipedia",
   customBaseUrl: "",
   customApiEndpoint: "",
-  customApiToken: "",
   customEngine: "mediawiki",
   startTitle: "대한민국",
   targetTitle: "철학",
@@ -448,9 +446,7 @@ function WikiSpeedrunSurface({
   const [customApiEndpoint, setCustomApiEndpoint] = useState(
     defaultLocalSettings.customApiEndpoint,
   );
-  const [customApiToken, setCustomApiToken] = useState(
-    defaultLocalSettings.customApiToken,
-  );
+  const [customApiToken, setCustomApiToken] = useState("");
   const [customEngine, setCustomEngine] = useState<WikiEngine>(
     defaultLocalSettings.customEngine,
   );
@@ -519,6 +515,7 @@ function WikiSpeedrunSurface({
   const success = result?.ok ? result : null;
   const failure = result && !result.ok ? result : null;
   const activeNode = success?.path[activeIndex] ?? success?.path[0];
+  const connectionDescription = describeSiteConnection(site);
 
   useEffect(() => {
     const saved = readLocalSettings();
@@ -527,7 +524,6 @@ function WikiSpeedrunSurface({
     setSiteKey(saved.siteKey);
     setCustomBaseUrl(saved.customBaseUrl);
     setCustomApiEndpoint(saved.customApiEndpoint);
-    setCustomApiToken(saved.customApiToken);
     setCustomEngine(saved.customEngine);
     setStartTitle(saved.startTitle);
     setTargetTitle(saved.targetTitle);
@@ -554,7 +550,6 @@ function WikiSpeedrunSurface({
       siteKey,
       customBaseUrl,
       customApiEndpoint,
-      customApiToken,
       customEngine,
       startTitle,
       targetTitle,
@@ -570,7 +565,6 @@ function WikiSpeedrunSurface({
     });
   }, [
     customApiEndpoint,
-    customApiToken,
     customBaseUrl,
     customEngine,
     includeFootnotes,
@@ -645,7 +639,7 @@ function WikiSpeedrunSurface({
       engine: site.engine,
       baseUrl: site.baseUrl,
       apiEndpoint: site.apiEndpoint || undefined,
-      apiToken: site.apiToken || undefined,
+      apiToken: site.apiToken?.trim() || undefined,
       startTitle,
       targetTitle,
       includeFootnotes,
@@ -852,11 +846,7 @@ function WikiSpeedrunSurface({
                     showIcon
                     type="success"
                     title={`${site.label} / ${site.engine}`}
-                    description={
-                      site.apiEndpoint
-                        ? `${site.apiEndpoint} · API preferred`
-                        : `${site.baseUrl} · RAW/HTML fallback`
-                    }
+                    description={connectionDescription}
                   />
                   {site.engine !== "mediawiki" ? (
                     <div>
@@ -869,7 +859,7 @@ function WikiSpeedrunSurface({
                         }
                         placeholder={
                           site.engine === "the-seed"
-                            ? "the seed API token"
+                            ? "optional API token"
                             : "optional"
                         }
                       />
@@ -1279,6 +1269,16 @@ function Metric({
   );
 }
 
+function describeSiteConnection(site: PresetSite & { apiToken?: string }) {
+  if (site.engine === "the-seed" && !site.apiToken?.trim()) {
+    return `${site.baseUrl} · public HTML fallback`;
+  }
+  if (site.apiEndpoint) {
+    return `${site.apiEndpoint} · API preferred`;
+  }
+  return `${site.baseUrl} · RAW/HTML fallback`;
+}
+
 function readLocalSettings() {
   if (typeof window === "undefined") {
     return defaultLocalSettings;
@@ -1347,10 +1347,6 @@ function sanitizeLocalSettings(value: unknown): LocalSettings {
     customApiEndpoint: stringOrDefault(
       candidate.customApiEndpoint,
       defaultLocalSettings.customApiEndpoint,
-    ),
-    customApiToken: stringOrDefault(
-      candidate.customApiToken,
-      defaultLocalSettings.customApiToken,
     ),
     customEngine,
     startTitle: stringOrDefault(

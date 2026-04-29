@@ -6,6 +6,7 @@ type WikiEngine =
   | "moniwiki";
 
 type ErrorCode =
+  | "INVALID_REQUEST"
   | "START_NOT_FOUND"
   | "TARGET_NOT_FOUND"
   | "SAME_DOCUMENT"
@@ -155,10 +156,14 @@ const jsonCache = new Map<string, { expires: number; value: unknown }>();
 const hostNextRequestAt = new Map<string, number>();
 const userAgent =
   "wiki-speedrun/0.2 (route search; local app; contact: local-development)";
+const maxTitleLength = 240;
+const maxUrlLength = 2048;
+const maxTokenLength = 4096;
+const maxRedirects = 5;
 
 export async function POST(request: Request) {
   try {
-    const body = normalizeRequest((await request.json()) as SpeedrunRequest);
+    const body = normalizeRequest(await request.json());
     if (new URL(request.url).searchParams.get("stream") === "1") {
       return streamSpeedrun(body);
     }
@@ -506,14 +511,8 @@ async function createWikiAdapter(request: SpeedrunRequest) {
     return createTheSeedApiAdapter(request);
   }
 
-  if (
-    request.engine === "the-seed" &&
-    safeUrl(request.baseUrl)?.hostname === "namu.wiki"
-  ) {
-    throw new SpeedrunError(
-      "LINK_EXTRACTION_FAILED",
-      "the seed public API requires an api_access token. Add an API token for this wiki, or use a the seed site that exposes readable server-rendered pages.",
-    );
+  if (request.engine === "the-seed") {
+    return createTheSeedPublicAdapter(request);
   }
 
   if (request.engine === "opennamu") {
@@ -534,6 +533,16 @@ async function createWikiAdapter(request: SpeedrunRequest) {
   }
 
   return createHtmlWikiAdapter(request);
+}
+
+function createTheSeedPublicAdapter(request: SpeedrunRequest): WikiAdapter {
+  const adapter = createHtmlWikiAdapter(request);
+  return {
+    ...adapter,
+    endpoint: `${request.engine}:public-html:${
+      safeUrl(request.baseUrl)?.origin ?? ""
+    }`,
+  };
 }
 
 function createHtmlWikiAdapter(request: SpeedrunRequest): WikiAdapter {
@@ -1342,9 +1351,12 @@ async function cachedJsonWithHeaders(
       Boolean(entry[1]),
     ),
   );
+  const hasSensitiveHeaders = Object.keys(requestHeaders).some((key) =>
+    ["authorization", "cookie"].includes(key.toLocaleLowerCase()),
+  );
   const headerKey = JSON.stringify(requestHeaders);
   const cacheKey = `${url}#${headerKey}`;
-  const cached = jsonCache.get(cacheKey);
+  const cached = hasSensitiveHeaders ? undefined : jsonCache.get(cacheKey);
   if (cached && cached.expires > Date.now()) {
     return cached.value as {
       query?: {
@@ -1369,7 +1381,12 @@ async function cachedJsonWithHeaders(
       data.error.info ?? "MediaWiki API error.",
     );
   }
-  jsonCache.set(cacheKey, { expires: Date.now() + 1000 * 60 * 8, value: data });
+  if (!hasSensitiveHeaders) {
+    jsonCache.set(cacheKey, {
+      expires: Date.now() + 1000 * 60 * 8,
+      value: data,
+    });
+  }
   return data;
 }
 
@@ -1400,23 +1417,22 @@ async function throttledFetch(
   headers: Record<string, string>,
   allowHttpErrors = false,
 ) {
-  const requestUrl = new URL(url);
-  await scheduleHost(requestUrl.origin);
+  if (!safePublicUrl(url)) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL must be a public http(s) URL.",
+    );
+  }
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let response: Response;
     try {
-      response = await fetch(url, {
-        cache: "no-store",
-        redirect: "follow",
-        signal: AbortSignal.timeout(12_000),
-        headers: {
-          ...headers,
-          "user-agent": userAgent,
-        },
-      });
+      response = await fetchWithSafeRedirects(url, headers);
     } catch (error) {
       if (attempt === 2) {
+        if (error instanceof SpeedrunError) {
+          throw error;
+        }
         throw new SpeedrunError(
           "NETWORK_ERROR",
           error instanceof Error ? error.message : "fetch failed",
@@ -1446,6 +1462,63 @@ async function throttledFetch(
     "SITE_RATE_LIMITED",
     "The wiki server returned HTTP 429 after retries.",
   );
+}
+
+async function fetchWithSafeRedirects(
+  initialUrl: string,
+  headers: Record<string, string>,
+) {
+  let current = initialUrl;
+  for (
+    let redirectCount = 0;
+    redirectCount <= maxRedirects;
+    redirectCount += 1
+  ) {
+    const requestUrl = safePublicUrl(current);
+    if (!requestUrl) {
+      throw new SpeedrunError(
+        "INVALID_WIKI_SITE",
+        "The wiki URL must be a public http(s) URL.",
+      );
+    }
+    await scheduleHost(requestUrl.origin);
+
+    const response = await fetch(requestUrl, {
+      cache: "no-store",
+      redirect: "manual",
+      signal: AbortSignal.timeout(12_000),
+      headers: {
+        ...headers,
+        "user-agent": userAgent,
+      },
+    });
+
+    if (!isRedirectStatus(response.status)) {
+      return response;
+    }
+
+    const location = response.headers.get("location");
+    if (!location) {
+      return response;
+    }
+    const nextUrl = safePublicUrl(location, requestUrl);
+    if (!nextUrl) {
+      throw new SpeedrunError(
+        "INVALID_WIKI_SITE",
+        "The wiki redirected to a blocked or invalid URL.",
+      );
+    }
+    current = nextUrl.toString();
+  }
+
+  throw new SpeedrunError(
+    "NETWORK_ERROR",
+    "The wiki redirected too many times.",
+  );
+}
+
+function isRedirectStatus(status: number) {
+  return status >= 300 && status < 400;
 }
 
 async function decodeResponseText(response: Response) {
@@ -1510,19 +1583,142 @@ function namespaceAllowed(ns: number, policy: NamespacePolicy) {
   return true;
 }
 
-function normalizeRequest(request: SpeedrunRequest): SpeedrunRequest {
+function normalizeRequest(value: unknown): SpeedrunRequest {
+  if (!value || typeof value !== "object") {
+    throw new SpeedrunError("INVALID_REQUEST", "Request body must be JSON.");
+  }
+
+  const request = value as Partial<SpeedrunRequest>;
+  const engine = isWikiEngine(request.engine) ? request.engine : null;
+  if (!engine) {
+    throw new SpeedrunError("INVALID_REQUEST", "Unsupported wiki engine.");
+  }
+
+  const baseUrl = stringField(request.baseUrl, "baseUrl", maxUrlLength);
+  const safeBaseUrl = safePublicUrl(baseUrl);
+  if (!safeBaseUrl) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The wiki URL must be a public http(s) URL.",
+    );
+  }
+
+  const apiEndpoint = optionalStringField(request.apiEndpoint, maxUrlLength);
+  const safeApiEndpoint = apiEndpoint ? safePublicUrl(apiEndpoint) : null;
+  if (apiEndpoint && !safeApiEndpoint) {
+    throw new SpeedrunError(
+      "INVALID_WIKI_SITE",
+      "The API URL must be a public http(s) URL.",
+    );
+  }
+
+  const search =
+    request.search && typeof request.search === "object"
+      ? (request.search as Partial<SpeedrunRequest["search"]>)
+      : {};
+  const requiredStep =
+    request.requiredStep && typeof request.requiredStep === "object"
+      ? (request.requiredStep as Partial<
+          NonNullable<SpeedrunRequest["requiredStep"]>
+        >)
+      : undefined;
+
   return {
-    ...request,
-    startTitle: request.startTitle.trim(),
-    targetTitle: request.targetTitle.trim(),
-    baseUrl: request.baseUrl.trim(),
-    apiEndpoint: request.apiEndpoint?.trim(),
-    apiToken: request.apiToken?.trim(),
+    engine,
+    startTitle: stringField(request.startTitle, "startTitle", maxTitleLength),
+    targetTitle: stringField(
+      request.targetTitle,
+      "targetTitle",
+      maxTitleLength,
+    ),
+    baseUrl: safeBaseUrl.toString(),
+    apiEndpoint: safeApiEndpoint?.toString(),
+    apiToken: normalizeApiToken(request.apiToken),
+    includeFootnotes: Boolean(request.includeFootnotes),
+    redirectMode: isRedirectMode(request.redirectMode)
+      ? request.redirectMode
+      : "auto",
+    namespacePolicy: sanitizeNamespacePolicy(request.namespacePolicy),
+    requiredStep: {
+      enabled: Boolean(requiredStep?.enabled),
+      position: clamp(
+        Math.trunc(numberOrDefault(requiredStep?.position, 2)),
+        2,
+        12,
+      ),
+      title: optionalStringField(requiredStep?.title, maxTitleLength),
+    },
     search: {
-      maxDepth: clamp(Math.trunc(request.search.maxDepth || 1), 1, 8),
-      maxNodes: clamp(Math.trunc(request.search.maxNodes || 80), 10, 1200),
+      maxDepth: clamp(Math.trunc(numberOrDefault(search.maxDepth, 1)), 1, 8),
+      maxNodes: clamp(
+        Math.trunc(numberOrDefault(search.maxNodes, 80)),
+        10,
+        1200,
+      ),
     },
   };
+}
+
+function sanitizeNamespacePolicy(value: unknown): NamespacePolicy {
+  if (!value || typeof value !== "object") {
+    return {
+      file: false,
+      category: false,
+      template: false,
+      user: false,
+      talk: false,
+      special: false,
+    };
+  }
+  const policy = value as Partial<NamespacePolicy>;
+  return {
+    file: Boolean(policy.file),
+    category: Boolean(policy.category),
+    template: Boolean(policy.template),
+    user: Boolean(policy.user),
+    talk: Boolean(policy.talk),
+    special: Boolean(policy.special),
+  };
+}
+
+function stringField(value: unknown, name: string, maxLength: number) {
+  const text = optionalStringField(value, maxLength);
+  if (!text) {
+    throw new SpeedrunError("INVALID_REQUEST", `${name} is required.`);
+  }
+  return text;
+}
+
+function optionalStringField(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return "";
+  }
+  return value.trim().slice(0, maxLength);
+}
+
+function numberOrDefault(value: unknown, fallback: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function normalizeApiToken(value: unknown) {
+  const token = optionalStringField(value, maxTokenLength);
+  return token.replace(/^bearer\s+/i, "") || undefined;
+}
+
+function isWikiEngine(value: unknown): value is WikiEngine {
+  return (
+    value === "mediawiki" ||
+    value === "the-seed" ||
+    value === "opennamu" ||
+    value === "dokuwiki" ||
+    value === "moniwiki"
+  );
+}
+
+function isRedirectMode(
+  value: unknown,
+): value is SpeedrunRequest["redirectMode"] {
+  return value === "auto" || value === "count";
 }
 
 function normalizeTitleInput(rawInput: string, baseUrl: string) {
@@ -1831,6 +2027,8 @@ function isExistingHtmlPage(fetched: HtmlFetchResult) {
     "문서가 없습니다",
     "없는 문서",
     "존재하지 않는 문서",
+    "문서가 존재하지 않습니다",
+    "해당 문서를 찾을 수 없습니다",
     "このページはまだ作成されていません",
     "not found",
   ];
@@ -2072,6 +2270,92 @@ function safeUrl(value: string, base?: URL) {
   }
 }
 
+function safePublicUrl(value: string | URL, base?: URL) {
+  const url =
+    value instanceof URL
+      ? new URL(value.toString())
+      : base
+        ? safeUrl(value, base)
+        : safeUrl(value);
+  if (!url || isBlockedHostname(url.hostname)) {
+    return null;
+  }
+  url.username = "";
+  url.password = "";
+  return url;
+}
+
+function isBlockedHostname(hostname: string) {
+  const normalized = hostname.toLocaleLowerCase().replace(/\.$/g, "");
+  if (
+    !normalized ||
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost")
+  ) {
+    return true;
+  }
+
+  const ipv4 = parseIpv4(normalized);
+  if (ipv4) {
+    return isPrivateIpv4(ipv4);
+  }
+
+  return isPrivateIpv6(normalized.replace(/^\[|\]$/g, ""));
+}
+
+function parseIpv4(hostname: string) {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) {
+    return null;
+  }
+  const octets = parts.map((part) => Number(part));
+  if (
+    octets.some(
+      (octet, index) =>
+        !Number.isInteger(octet) ||
+        octet < 0 ||
+        octet > 255 ||
+        String(octet) !== parts[index],
+    )
+  ) {
+    return null;
+  }
+  return octets as [number, number, number, number];
+}
+
+function isPrivateIpv4([first, second]: [number, number, number, number]) {
+  return (
+    first === 0 ||
+    first === 10 ||
+    first === 127 ||
+    first >= 224 ||
+    (first === 100 && second >= 64 && second <= 127) ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 198 && (second === 18 || second === 19))
+  );
+}
+
+function isPrivateIpv6(hostname: string) {
+  if (!hostname.includes(":")) {
+    return false;
+  }
+  if (hostname === "::1" || hostname === "::") {
+    return true;
+  }
+  const mappedIpv4 = hostname.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i)?.[1];
+  if (mappedIpv4) {
+    const ipv4 = parseIpv4(mappedIpv4);
+    return !ipv4 || isPrivateIpv4(ipv4);
+  }
+  const firstHextet = Number.parseInt(hostname.split(":")[0] ?? "", 16);
+  return (
+    Number.isFinite(firstHextet) &&
+    ((firstHextet & 0xfe00) === 0xfc00 || (firstHextet & 0xffc0) === 0xfe80)
+  );
+}
+
 function chunk<T>(items: T[], size: number) {
   const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
@@ -2091,7 +2375,11 @@ function sleep(ms: number) {
 function fail(code: ErrorCode, message: string) {
   return Response.json(failurePayload(code, message), {
     status:
-      code === "NETWORK_ERROR" || code === "SITE_RATE_LIMITED" ? 502 : 200,
+      code === "NETWORK_ERROR" || code === "SITE_RATE_LIMITED"
+        ? 502
+        : code === "INVALID_REQUEST" || code === "INVALID_WIKI_SITE"
+          ? 400
+          : 200,
   });
 }
 

@@ -6,6 +6,8 @@ Wiki Speedrun is a Next.js app for finding and visualizing fast routes between w
 
 - MediaWiki support through the official API.
 - HTML-link adapters for the seed, openNAMU, DokuWiki, and MoniWiki sites.
+- the seed searches public HTML without an API token, and uses the API when a
+  token is supplied.
 - Title and URL normalization before comparing documents.
 - Redirect handling with two modes: automatic resolution or counting redirects as clicks.
 - Link filtering for footnotes and non-article namespaces.
